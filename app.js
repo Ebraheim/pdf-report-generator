@@ -10,41 +10,104 @@ const { generatePdf } = require("./pdfGenerator");
 const app = express();
 const PORT = 3000;
 
+const reportsInProgress = new Map();
+
 app.use(express.json());
 
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
 });
 
+async function createReport(idempotencyKey) {
+  const reportId = crypto.randomUUID();
+  const relativePath = path.join("reports", `${reportId}.pdf`);
+  const absolutePath = path.join(__dirname, relativePath);
+
+  const reportData = getReportData();
+  const orders = getAllOrders();
+  const html = buildReportHtml(reportData, orders);
+
+  await generatePdf(html, absolutePath);
+
+  const createdAt = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO reports (
+      id,
+      path,
+      created_at,
+      idempotency_key
+    )
+    VALUES (?, ?, ?, ?)
+  `).run(
+    reportId,
+    relativePath,
+    createdAt,
+    idempotencyKey
+  );
+
+  return {
+    id: reportId,
+    file: `/reports/${reportId}/file`,
+    created_at: createdAt,
+  };
+}
+
 app.post("/reports", async (req, res) => {
+  const idempotencyKey =
+    req.get("Idempotency-Key")?.trim();
+
+  if (!idempotencyKey) {
+    return res.status(400).json({
+      error: "Idempotency-Key header is required",
+    });
+  }
+
   try {
-    const reportId = crypto.randomUUID();
-    const relativePath = path.join("reports", `${reportId}.pdf`);
-    const absolutePath = path.join(__dirname, relativePath);
+    const existingReport = db
+      .prepare(`
+        SELECT id, created_at
+        FROM reports
+        WHERE idempotency_key = ?
+      `)
+      .get(idempotencyKey);
 
-    const reportData = getReportData();
-    const orders = getAllOrders();
-    const html = buildReportHtml(reportData, orders);
+    if (existingReport) {
+      return res.status(200).json({
+        id: existingReport.id,
+        file: `/reports/${existingReport.id}/file`,
+        created_at: existingReport.created_at,
+        reused: true,
+      });
+    }
 
-    await generatePdf(html, absolutePath);
+    let generationPromise =
+      reportsInProgress.get(idempotencyKey);
 
-    const createdAt = new Date().toISOString();
+    const isNewRequest = !generationPromise;
 
-    db.prepare(`
-      INSERT INTO reports (id, path, created_at)
-      VALUES (?, ?, ?)
-    `).run(reportId, relativePath, createdAt);
+    if (isNewRequest) {
+      generationPromise = createReport(idempotencyKey);
+      reportsInProgress.set(
+        idempotencyKey,
+        generationPromise
+      );
+    }
 
-    res.status(201).json({
-      id: reportId,
-      file: `/reports/${reportId}/file`,
+    const report = await generationPromise;
+
+    return res.status(isNewRequest ? 201 : 200).json({
+      ...report,
+      reused: !isNewRequest,
     });
   } catch (error) {
     console.error("Report generation failed:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       error: "Failed to generate report",
     });
+  } finally {
+    reportsInProgress.delete(idempotencyKey);
   }
 });
 
@@ -59,7 +122,10 @@ app.get("/reports/:id/file", (req, res) => {
     });
   }
 
-  const absolutePath = path.resolve(__dirname, report.path);
+  const absolutePath = path.resolve(
+    __dirname,
+    report.path
+  );
 
   res.sendFile(absolutePath, (error) => {
     if (error && !res.headersSent) {

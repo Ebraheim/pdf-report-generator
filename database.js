@@ -20,4 +20,26 @@ db.exec(`
   );
 `);
 
+const reportColumns = db
+  .prepare("PRAGMA table_info(reports)")
+  .all();
+
+const hasIdempotencyKey = reportColumns.some(
+  (column) => column.name === "idempotency_key"
+);
+
+if (!hasIdempotencyKey) {
+  db.exec(`
+    ALTER TABLE reports
+    ADD COLUMN idempotency_key TEXT
+  `);
+}
+
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS
+  reports_idempotency_key_index
+  ON reports (idempotency_key)
+  WHERE idempotency_key IS NOT NULL
+`);
+
 module.exports = db;
