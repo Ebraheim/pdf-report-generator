@@ -11,7 +11,13 @@ db.exec(`
     product TEXT NOT NULL,
     amount REAL NOT NULL,
     created_at TEXT NOT NULL
-  )
+  );
+
+  CREATE TABLE IF NOT EXISTS reports (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
 `);
 
 module.exports = db;
